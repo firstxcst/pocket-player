@@ -35,8 +35,12 @@ release 产物未签名，需自行 `zipalign` + `apksigner` 签名；签名密�
 
 ## 已知限制
 
-- 覆盖 MP4 / MKV / WebM / AVI / TS / FLV 等容器与设备 MediaCodec 支持的编码；
-  AC3 / DTS / RMVB 等冷门编码需打开 `media3-decoder-ffmpeg`（体积 +8~15 MB），默认关闭。
+- 覆盖 MP4 / MKV / WebM / AVI / TS / FLV 等容器与设备 MediaCodec 支持的编码。
+- **官方不向 Maven 发布 `media3-decoder-ffmpeg` 的 AAR**（Google Maven 上只有 `media3-decoder` 基础模块，
+  实测 1.5.1 的 aar/pom 均 404）。想要 App 内软解 AC3 / DTS，必须按 `libraries/decoder_ffmpeg/README.md`
+  用 NDK 自行编译，或改用第三方预编译分支；代价是体积和构建复杂度，默认版本不含任何 `.so`。
+- 因此遇到不支持的音轨时，App 会**自动静音播放**（v1.0.2 起）；想保留声音，用
+  `tools/prepare_videos.ps1` 在电脑端把音轨批量转成 AAC（视频轨直接 copy，不重编码、不改动原文件）。
 - Transformer 与播放器共用 extractor，RMVB / WMV 这类连容器都解不开的老格式无法靠转码救回。
 - 深度扫描需要「所有文件访问权限」；不授予也能用，只是列表可能不全。上架 Play 需按本地播放器类目申报。
 

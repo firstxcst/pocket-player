@@ -25,7 +25,7 @@ import java.io.File
  * 输出到 app 私有外部目录，不申请额外写权限。
  *
  * 注意：RMVB / WMV 这类连容器都解不开的老格式，Transformer 与 ExoPlayer 共用 extractor，
- * 同样无能为力，需要 media3-decoder-ffmpeg 扩展（体积代价见 build.gradle.kts）。
+ * 同样无能为力；官方不发布 FFmpeg 扩展 AAR，需自行用 NDK 编译，或在电脑端预处理。
  */
 object TranscodeHelper {
 

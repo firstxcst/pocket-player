@@ -86,6 +86,8 @@ class PlayerActivity : AppCompatActivity() {
     private var seekDragging = false
     private var pendingSeekMs = 0L
     private var seekGestureActive = false
+    private var autoAudioRetryDone = false
+    private var audioMuted = false
     private var brightness = 0.6f
     private var volumeFraction = 0.5f
 
@@ -375,11 +377,26 @@ class PlayerActivity : AppCompatActivity() {
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             PlaybackQueue.index = player.currentMediaItemIndex
+            autoAudioRetryDone = false
+            if (audioMuted) setAudioDisabled(false)   // 每个文件独立判断，切片恢复声音
             updateTitle()
             updateTimes()
         }
 
-        override fun onPlayerError(error: PlaybackException) = handlePlaybackError(error)
+        override fun onPlayerError(error: PlaybackException) {
+            // 第一次解码失败：大概率是 AC3/DTS 音轨，先自动静音重试，别让用户先吃一个弹窗
+            if (!autoAudioRetryDone &&
+                error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
+            ) {
+                autoAudioRetryDone = true
+                setAudioDisabled(true)
+                player.prepare()
+                player.playWhenReady = true
+                showHint("音轨不受支持，已静音播放\n电脑端 tools/prepare_videos.ps1 可转 AAC 恢复声音")
+                return
+            }
+            handlePlaybackError(error)
+        }
     }
 
     private fun startTicker() {
@@ -625,6 +642,7 @@ class PlayerActivity : AppCompatActivity() {
         val labels = arrayOf(
             "转码 / 导出",
             "快进步长",
+            if (audioMuted) "重新启用音轨" else "静音播放（跳过不支持的音轨）",
             if (locked) "解锁画面" else "锁定画面",
             "从头播放",
             "播放列表（${PlaybackQueue.items.size} 项）"
@@ -633,9 +651,10 @@ class PlayerActivity : AppCompatActivity() {
             when (which) {
                 0 -> showTranscodeMenu(currentItem())
                 1 -> showStepDialog()
-                2 -> setLocked(!locked)
-                3 -> player.seekTo(0L)
-                4 -> showPlaylist()
+                2 -> toggleAudioMute()
+                3 -> setLocked(!locked)
+                4 -> player.seekTo(0L)
+                5 -> showPlaylist()
             }
         }.show()
     }
@@ -666,9 +685,10 @@ class PlayerActivity : AppCompatActivity() {
             append("设备：${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         }
         val advice = if (legacy) {
-            "\n\n这个容器的 extractor 系统不认，转码通常也救不了；建议交给带软解的播放器，或开启 FFmpeg 扩展。"
+            "\n\n这个容器的 extractor 系统不认，转码通常也救不了；建议交给带软解的播放器，或自行用 NDK 编译 FFmpeg 解码扩展。"
         } else {
-            "\n\n最常见的原因是音轨编码（AC3 / DTS 等）设备不支持，视频轨本身没问题——先试「忽略音轨重试」，最快。"
+            "\n\n最常见的是音轨编码（AC3 / DTS 等）设备不支持。已自动尝试静音重试；" +
+                "想保留声音，可在电脑端用 tools/prepare_videos.ps1 把音轨转成 AAC。"
         }
         val actions = arrayOf(
             "忽略音轨重试",
@@ -698,13 +718,25 @@ class PlayerActivity : AppCompatActivity() {
 
     /** 多数「解码失败」其实是音轨编码不认，禁掉音频轨直接重解码 */
     private fun retryWithoutAudio() {
-        player.trackSelectionParameters = player.trackSelectionParameters
-            .buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
-            .build()
+        setAudioDisabled(true)
         player.prepare()
         player.playWhenReady = true
         showHint("已忽略音轨，重新解码中…")
+    }
+
+    private fun setAudioDisabled(disabled: Boolean) {
+        audioMuted = disabled
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, disabled)
+            .build()
+    }
+
+    private fun toggleAudioMute() {
+        setAudioDisabled(!audioMuted)
+        player.prepare()
+        player.playWhenReady = true
+        showHint(if (audioMuted) "已静音播放" else "已恢复音轨")
     }
 
     /** 交给系统 / 第三方播放器（MX Player、VLC 等带软解的） */

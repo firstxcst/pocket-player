@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 仅用于检查 GitHub Release 新版本 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Android 13+ 视频读取权限 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- Android 12 及以下 -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- 可选：递归扫描隐藏目录 / 外置 SD 卡 / 未被 MediaStore 索引的文件。
+         不授予也能用，只是列表可能不全。上架 Play 需按「本地文件管理器/播放器」类目申报。 -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/ic_app"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.PocketPlayer"
+        tools:targetApi="33">
+
+        <activity
+            android:name=".PlayerActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.PocketPlayer.Player" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

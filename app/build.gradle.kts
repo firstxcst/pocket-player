@@ -11,8 +11,8 @@ android {
         applicationId = "com.silas.pocketplayer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.4.0"
+        versionCode = 8
+        versionName = "1.5.0"
         // lite 无 native 库；full 只打 arm64-v8a，控制 FFmpeg so 带来的体积增量
         ndk { abiFilters.add("arm64-v8a") }
     }

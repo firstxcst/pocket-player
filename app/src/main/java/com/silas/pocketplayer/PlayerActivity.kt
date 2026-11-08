@@ -30,10 +30,13 @@ import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -61,11 +64,18 @@ import kotlin.math.abs
 
 class PlayerActivity : AppCompatActivity() {
 
+    // Netflix 风格：近黑底 + 红色强调
+    private val wegRed = 0xFFE50914.toInt()
+    private val wegRedDim = 0x55E50914.toInt()
+    private val wegSurface = 0xFF101010.toInt()
+    private val wegTextDim = 0xFFA8A8A8.toInt()
+
     private lateinit var prefs: Prefs
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
     private lateinit var gesture: GestureLayer
     private lateinit var topBar: LinearLayout
+    private lateinit var topRightBar: LinearLayout
     private lateinit var bottomBar: LinearLayout
     private lateinit var titleView: TextView
     private lateinit var lockBtn: TextView
@@ -91,14 +101,11 @@ class PlayerActivity : AppCompatActivity() {
     private var audioMuted = false
     private var landscapePreferred = false
 
-    /** 音量锁：默认静音，必须点右上角解锁；所有音量控制只在软件内生效 */
-    private var volumeUnlocked = false
-    private var volumeOn = false
+    /** 音量只有两个状态：锁定（静音，一切调节失效）/ 解锁（可调整） */
+    private var volumeLocked = true
     private var softwareVolume = 1.0f
 
-    /** 长按期间的临时 2x，松手恢复常驻倍速 */
     private var tempSpeedActive = false
-
     private var fastSeek = true
     private var cachedDurationMs = 0L
     private var lastSeekHintMs = 0L
@@ -119,7 +126,9 @@ class PlayerActivity : AppCompatActivity() {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             hide(WindowInsetsCompat.Type.systemBars())
         }
-        setContentView(buildUi())
+        val root = buildUi()
+        setContentView(root)
+        applyCutoutInsets(root)
         landscapePreferred = prefs.landscapePreferred
         applyOrientation()
         initBrightness()
@@ -146,12 +155,8 @@ class PlayerActivity : AppCompatActivity() {
             KeyEvent.KEYCODE_VOLUME_MUTE -> {
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     when {
-                        !volumeUnlocked -> showHint("音量已锁定 · 点右上角解锁")
-                        event.keyCode == KeyEvent.KEYCODE_VOLUME_MUTE -> {
-                            volumeOn = !volumeOn
-                            applyVolumeState()
-                            showHint(if (volumeOn) "音量已恢复" else "已静音")
-                        }
+                        event.keyCode == KeyEvent.KEYCODE_VOLUME_MUTE -> toggleVolumeLock()
+                        volumeLocked -> showHint("音量已锁定 · 点「解锁」")
                         else -> adjustSoftwareVolume(
                             if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) 0.1f else -0.1f
                         )
@@ -163,7 +168,47 @@ class PlayerActivity : AppCompatActivity() {
         return super.dispatchKeyEvent(event)
     }
 
-    // ---------------------------------------------------------------- UI（纯代码构建，无 XML 膨胀开销）
+    // ---------------------------------------------------------------- UI
+
+    /** 挖孔/刘海适配：画面铺满，但所有控制按钮按 DisplayCutout 安全边距避让 */
+    private fun applyCutoutInsets(root: View) {
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val cut = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val l = maxOf(cut.left, bars.left)
+            val t = maxOf(cut.top, bars.top)
+            val r = maxOf(cut.right, bars.right)
+            val b = maxOf(cut.bottom, bars.bottom)
+
+            topBar.setPadding(
+                8.dp(this) + l,
+                16.dp(this) + t,
+                230.dp(this) + r,
+                24.dp(this)
+            )
+            bottomBar.setPadding(
+                20.dp(this) + l,
+                48.dp(this),
+                20.dp(this) + r,
+                16.dp(this) + b
+            )
+            (topRightBar.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.topMargin = 16.dp(this) + t
+                lp.marginEnd = 16.dp(this) + r
+                topRightBar.layoutParams = lp
+            }
+            (markerBtn.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.leftMargin = 12.dp(this) + l
+                markerBtn.layoutParams = lp
+            }
+            (hintView.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.topMargin = 140.dp(this) + t
+                hintView.layoutParams = lp
+            }
+            insets
+        }
+        ViewCompat.requestApplyInsets(root)
+    }
 
     private fun buildUi(): View = FrameLayout(this).apply {
         setBackgroundColor(Color.BLACK)
@@ -182,7 +227,11 @@ class PlayerActivity : AppCompatActivity() {
             textSize = 16f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = chipBg(0xB3000000.toInt(), 16.dp(this@PlayerActivity).toFloat())
+            background = GradientDrawable().apply {
+                setColor(0xE6101010.toInt())
+                cornerRadius = 12.dp(this@PlayerActivity).toFloat()
+                setStroke(2.dp(this@PlayerActivity), wegRed)
+            }
             setPadding(20.dp(this@PlayerActivity), 12.dp(this@PlayerActivity), 20.dp(this@PlayerActivity), 12.dp(this@PlayerActivity))
             visibility = View.GONE
         }
@@ -194,6 +243,7 @@ class PlayerActivity : AppCompatActivity() {
 
         buffering = CircularProgressIndicator(this@PlayerActivity).apply {
             setIndeterminate(true)
+            setIndicatorColor(wegRed)
             visibility = View.GONE
         }
         addView(buffering, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.CENTER))
@@ -204,34 +254,36 @@ class PlayerActivity : AppCompatActivity() {
         bottomBar = buildBottomBar()
         addView(bottomBar, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM))
 
-        val topRight = LinearLayout(this@PlayerActivity).apply {
+        topRightBar = LinearLayout(this@PlayerActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         orientationBtn = compactChip("横屏") { toggleOrientation() }
-        volumeBtn = compactChip("静音 · 解锁") { onVolumeButtonClick() }
+        volumeBtn = compactChip("解锁") { toggleVolumeLock() }
         lockBtn = compactChip("锁定") { setLocked(!locked) }
-        topRight.addView(
+        volumeBtn.background = chipBg(0x22E50914, stroke = wegRed)
+        topRightBar.addView(
             orientationBtn,
             LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 8.dp(this@PlayerActivity) }
         )
-        topRight.addView(
+        topRightBar.addView(
             volumeBtn,
             LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 8.dp(this@PlayerActivity) }
         )
-        topRight.addView(lockBtn)
+        topRightBar.addView(lockBtn)
         addView(
-            topRight,
+            topRightBar,
             FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
                 topMargin = 16.dp(this@PlayerActivity)
                 marginEnd = 16.dp(this@PlayerActivity)
             }
         )
 
-        // 左侧常驻标记按钮：短按打点，长按一键跳转到下一个标记
+        // 左侧常驻标记：短按打点，长按弹出可点击/可删除的标记列表
         markerBtn = compactChip("标记") { addMarkAtCurrent() }
+        markerBtn.background = chipBg(0xCCE50914.toInt())
         markerBtn.setOnLongClickListener {
-            jumpToNextMark()
+            showMarksMenu()
             true
         }
         addView(
@@ -246,13 +298,14 @@ class PlayerActivity : AppCompatActivity() {
         gravity = Gravity.CENTER_VERTICAL
         background = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(0xDD000000.toInt(), 0x00000000)
+            intArrayOf(0xF0000000.toInt(), 0x00000000)
         )
-        setPadding(8.dp(this@PlayerActivity), 16.dp(this@PlayerActivity), 260.dp(this@PlayerActivity), 24.dp(this@PlayerActivity))
+        setPadding(8.dp(this@PlayerActivity), 16.dp(this@PlayerActivity), 230.dp(this@PlayerActivity), 24.dp(this@PlayerActivity))
         addView(iconButton(android.R.drawable.ic_menu_revert, "返回") { finish() })
         titleView = TextView(this@PlayerActivity).apply {
             setTextColor(Color.WHITE)
-            textSize = 15f
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.MIDDLE
             layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
@@ -266,23 +319,30 @@ class PlayerActivity : AppCompatActivity() {
         orientation = LinearLayout.VERTICAL
         background = GradientDrawable(
             GradientDrawable.Orientation.BOTTOM_TOP,
-            intArrayOf(0xE6000000.toInt(), 0x00000000)
+            intArrayOf(0xF5000000.toInt(), 0x00000000)
         )
         setPadding(20.dp(this@PlayerActivity), 48.dp(this@PlayerActivity), 20.dp(this@PlayerActivity), 16.dp(this@PlayerActivity))
+
+        // 红色细分隔线，增强影院感
+        addView(
+            View(this@PlayerActivity).apply { setBackgroundColor(wegRedDim) },
+            LinearLayout.LayoutParams(MATCH_PARENT, 1.dp(this@PlayerActivity))
+        )
 
         val timeRow = LinearLayout(this@PlayerActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 10.dp(this@PlayerActivity), 0, 0)
         }
         timeNow = TextView(this@PlayerActivity).apply {
-            text = "00:00"; setTextColor(Color.WHITE); textSize = 12f
+            text = "00:00"; setTextColor(Color.WHITE); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
         }
         timeTotal = TextView(this@PlayerActivity).apply {
-            text = "00:00"; setTextColor(Color.WHITE); textSize = 12f
+            text = "00:00"; setTextColor(wegTextDim); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
         }
         seekBar = SeekBar(this@PlayerActivity).apply {
             max = 1000
-            progressTintList = ColorStateList.valueOf(0xFF4C8BF5.toInt())
+            progressTintList = ColorStateList.valueOf(wegRed)
             thumbTintList = ColorStateList.valueOf(Color.WHITE)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
@@ -320,14 +380,18 @@ class PlayerActivity : AppCompatActivity() {
         val row = LinearLayout(this@PlayerActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, 10.dp(this@PlayerActivity), 0, 0)
+            setPadding(0, 12.dp(this@PlayerActivity), 0, 0)
         }
         fun add(view: View) = row.addView(
             view,
-            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 3.dp(this@PlayerActivity) }
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 4.dp(this@PlayerActivity) }
         )
 
         playBtn = iconButton(android.R.drawable.ic_media_play, "播放") { togglePlay() }
+        playBtn.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(wegRed)
+        }
         listOf(-30, -10, 10, 30).forEach { seconds ->
             if (seconds == 10) add(playBtn)
             val button = compactChip(if (seconds > 0) "+${seconds}s" else "${seconds}s") {
@@ -359,14 +423,15 @@ class PlayerActivity : AppCompatActivity() {
         setTextColor(Color.WHITE)
         textSize = 12f
         gravity = Gravity.CENTER
-        background = chipBg(0x33FFFFFF)
+        background = chipBg(0x22FFFFFF)
         setPadding(8.dp(this@PlayerActivity), 8.dp(this@PlayerActivity), 8.dp(this@PlayerActivity), 8.dp(this@PlayerActivity))
         setOnClickListener { onClick() }
     }
 
-    private fun chipBg(color: Int, radius: Float = 999f) = GradientDrawable().apply {
+    private fun chipBg(color: Int, stroke: Int? = null) = GradientDrawable().apply {
         setColor(color)
-        cornerRadius = radius
+        cornerRadius = 999f
+        if (stroke != null) setStroke(1.dp(this@PlayerActivity), stroke)
     }
 
     private fun selectableBg(): Int {
@@ -415,7 +480,7 @@ class PlayerActivity : AppCompatActivity() {
                 .setUsage(C.USAGE_MEDIA)
                 .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
                 .build(),
-            false   // 不抢音频焦点：本地播放器被系统 duck 会导致「解锁也没声音」
+            false
         )
         player.setPlaybackSpeed(prefs.speed)
         player.setSeekParameters(
@@ -445,7 +510,6 @@ class PlayerActivity : AppCompatActivity() {
             buffering.visibility = if (state == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
             if (state == Player.STATE_READY) {
                 cachedDurationMs = player.duration.coerceAtLeast(0)
-                // 音频 renderer 就绪后重新施加音量，避免解锁后仍无声
                 applyVolumeState()
                 updateTimes()
                 updateSeekSensitivity()
@@ -587,7 +651,7 @@ class PlayerActivity : AppCompatActivity() {
         } else showControls()
     }
 
-    // ---------------------------------------------------------------- 音量锁 / 屏幕调节
+    // ---------------------------------------------------------------- 音量：只有锁定 / 解锁
 
     private fun initBrightness() {
         val current = window.attributes.screenBrightness
@@ -596,40 +660,32 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun applyVolumeState() {
         if (!::player.isInitialized || !::volumeBtn.isInitialized) return
-        player.volume = if (volumeUnlocked && volumeOn) softwareVolume else 0f
-        volumeBtn.text = when {
-            !volumeUnlocked -> "静音 · 解锁"
-            volumeOn -> "音量已开"
-            else -> "已静音 · 恢复"
-        }
+        player.volume = if (volumeLocked) 0f else softwareVolume
+        volumeBtn.text = if (volumeLocked) "解锁" else "锁定"
     }
 
-    private fun onVolumeButtonClick() {
+    /** 点「锁定」→ 立即静音；点「解锁」→ 恢复声音并允许调整，没有第三种状态 */
+    private fun toggleVolumeLock() {
         if (locked) {
             showHint("请先点右上角解锁画面")
             return
         }
-        if (!volumeUnlocked) {
-            volumeUnlocked = true
-            volumeOn = true
-            // 之前若因兼容问题禁过音轨，解锁时一并恢复；并把音量兜到可听水平
+        volumeLocked = !volumeLocked
+        if (!volumeLocked) {
             if (audioMuted) setAudioDisabled(false)
             softwareVolume = softwareVolume.coerceAtLeast(0.6f)
-        } else {
-            volumeOn = !volumeOn
         }
         applyVolumeState()
-        showHint(if (volumeOn) "音量已解锁" else "已静音")
+        showHint(if (volumeLocked) "音量已锁定 · 静音" else "音量已解锁 · 可调整")
         scheduleHide()
     }
 
     private fun adjustSoftwareVolume(delta: Float) {
-        if (!volumeUnlocked) {
-            showHint("音量已锁定 · 点右上角解锁")
+        if (volumeLocked) {
+            showHint("音量已锁定 · 点「解锁」")
             return
         }
         softwareVolume = (softwareVolume + delta).coerceIn(0f, 1f)
-        volumeOn = softwareVolume > 0f
         applyVolumeState()
         showHint("软件音量  ${(softwareVolume * 100).toInt()}%")
     }
@@ -640,7 +696,7 @@ class PlayerActivity : AppCompatActivity() {
         showHint("亮度  ${(brightness * 100).toInt()}%")
     }
 
-    /** 屏幕上可见可调：亮度改窗口属性，音量改 player.volume，都不碰系统设置 */
+    /** 屏幕上可见可调：亮度改窗口属性，音量改 player.volume；锁定时音量不可调 */
     private fun showBrightnessVolumeDialog() {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -652,31 +708,30 @@ class PlayerActivity : AppCompatActivity() {
             textSize = 13f
             setPadding(0, 10.dp(this@PlayerActivity), 0, 4.dp(this@PlayerActivity))
         }
-        val volumeLabel = label("软件音量  ${(softwareVolume * 100).toInt()}%")
+        val volumeLabel = label("软件音量  ${(softwareVolume * 100).toInt()}%  ${if (volumeLocked) "（已锁定）" else ""}")
         val volumeBar = SeekBar(this).apply {
             max = 100
             progress = (softwareVolume * 100).toInt()
-            progressTintList = ColorStateList.valueOf(0xFF4C8BF5.toInt())
+            progressTintList = ColorStateList.valueOf(wegRed)
             thumbTintList = ColorStateList.valueOf(Color.WHITE)
         }
         val brightnessLabel = label("亮度  ${(brightness * 100).toInt()}%")
         val brightnessBar = SeekBar(this).apply {
             max = 100
             progress = (brightness * 100).toInt()
-            progressTintList = ColorStateList.valueOf(0xFFFFB74D.toInt())
+            progressTintList = ColorStateList.valueOf(0xFFFFC107.toInt())
             thumbTintList = ColorStateList.valueOf(Color.WHITE)
         }
         volumeBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                if (!fromUser) return
+                if (!fromUser || volumeLocked) return
                 softwareVolume = p / 100f
-                volumeOn = softwareVolume > 0f
                 volumeLabel.text = "软件音量  $p%"
-                if (volumeUnlocked) applyVolumeState()
+                applyVolumeState()
             }
             override fun onStartTrackingTouch(sb: SeekBar?) = Unit
             override fun onStopTrackingTouch(sb: SeekBar?) {
-                if (!volumeUnlocked) showHint("音量已锁定 · 点右上角解锁后生效")
+                if (volumeLocked) showHint("音量已锁定 · 点「解锁」后可调整")
             }
         })
         brightnessBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -749,7 +804,7 @@ class PlayerActivity : AppCompatActivity() {
     private fun highlightSeekStep(seconds: Int) {
         seekStepViews.forEach { view ->
             val selected = (view.tag as? Int)?.let { abs(it) == seconds } == true
-            view.background = chipBg(if (selected) 0xFF2E6BE6.toInt() else 0x33FFFFFF)
+            view.background = if (selected) chipBg(wegRed) else chipBg(0x22FFFFFF)
         }
     }
 
@@ -775,26 +830,6 @@ class PlayerActivity : AppCompatActivity() {
         scheduleHide()
     }
 
-    /** 长按标记按钮：跳到下一个标记，没有下一个就回到第一个 */
-    private fun jumpToNextMark() {
-        if (locked) {
-            showHint("已锁定 · 点右上角解锁")
-            return
-        }
-        val item = currentItem() ?: return
-        val marks = prefs.marksOf(item.path)
-        if (marks.isEmpty()) {
-            showHint("还没有标记 · 短按「标记」添加")
-            return
-        }
-        val pos = player.currentPosition
-        val target = marks.firstOrNull { it > pos + 1000L } ?: marks.first()
-        player.seekTo(target)
-        updateTimes()
-        showHint("跳转标记 ${formatTime(target)}")
-        scheduleHide()
-    }
-
     private fun refreshMarkers() {
         if (!::markerView.isInitialized || !::player.isInitialized) return
         val item = currentItem()
@@ -803,25 +838,61 @@ class PlayerActivity : AppCompatActivity() {
         markerView.refresh()
     }
 
-    private fun showMarksDialog() {
+    /** 长按标记键 / 更多菜单：列出全部标记，点时间跳转，点删除移除单条 */
+    private fun showMarksMenu() {
         val item = currentItem() ?: return
-        val list = prefs.marksOf(item.path)
-        if (list.isEmpty()) {
-            showHint("这个视频还没有标记，短按左侧「标记」添加")
+        val marks = prefs.marksOf(item.path)
+        if (marks.isEmpty()) {
+            showHint("还没有标记 · 短按左侧「标记」添加")
             return
         }
-        val labels = list.map { "跳到 ${formatTime(it)}" }.toTypedArray()
-        MaterialAlertDialogBuilder(this)
-            .setTitle("关键节点（${list.size}）")
-            .setItems(labels) { _, which ->
-                player.seekTo(list[which])
-                updateTimes()
+        var dialog: AlertDialog? = null
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24.dp(this@PlayerActivity), 8.dp(this@PlayerActivity), 24.dp(this@PlayerActivity), 0)
+        }
+        for (mark in marks) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, 6.dp(this@PlayerActivity), 0, 6.dp(this@PlayerActivity))
             }
+            val jump = TextView(this).apply {
+                text = "▶   ${formatTime(mark)}"
+                setTextColor(Color.WHITE)
+                textSize = 16f
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, 10.dp(this@PlayerActivity), 0, 10.dp(this@PlayerActivity))
+                setOnClickListener {
+                    player.seekTo(mark)
+                    updateTimes()
+                    dialog?.dismiss()
+                    showHint("跳转标记 ${formatTime(mark)}")
+                }
+            }
+            val del = compactChip("删除") {
+                prefs.removeMark(item.path, mark)
+                refreshMarkers()
+                dialog?.dismiss()
+                showHint("已删除标记 ${formatTime(mark)}")
+                showMarksMenu()   // 用剩余标记重建列表
+            }
+            del.setTextColor(wegRed)
+            row.addView(jump, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            row.addView(del)
+            column.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        val scroll = ScrollView(this).apply { addView(column) }
+        dialog = MaterialAlertDialogBuilder(this)
+            .setTitle("已标记（${marks.size}）· 点击跳转")
+            .setView(scroll)
             .setNeutralButton("清除全部") { _, _ ->
                 prefs.clearMarks(item.path)
                 refreshMarkers()
                 showHint("标记已清除")
-            }.show()
+            }
+            .setNegativeButton("关闭", null)
+            .show()
     }
 
     private fun switchVideo(next: Boolean) {
@@ -924,8 +995,6 @@ class PlayerActivity : AppCompatActivity() {
             "亮度 / 音量调节",
             "双击步长（${prefs.seekStepSec}s）",
             if (fastSeek) "改为精确定位（较慢）" else "改为快速定位（推荐）",
-            if (volumeUnlocked) "静音 / 恢复音量" else "解锁音量",
-            if (audioMuted) "重新启用音轨" else "静音播放（跳过不支持的音轨）",
             if (locked) "解锁画面" else "锁定画面",
             "从头播放",
             "播放列表（${PlaybackQueue.items.size} 项）",
@@ -934,19 +1003,14 @@ class PlayerActivity : AppCompatActivity() {
         MaterialAlertDialogBuilder(this).setItems(labels) { _, which ->
             when (which) {
                 0 -> showSpeedDialog()
-                1 -> showMarksDialog()
+                1 -> showMarksMenu()
                 2 -> showBrightnessVolumeDialog()
                 3 -> showStepDialog()
                 4 -> toggleFastSeek()
-                5 -> if (volumeUnlocked) {
-                    volumeOn = !volumeOn
-                    applyVolumeState()
-                } else onVolumeButtonClick()
-                6 -> toggleAudioMute()
-                7 -> setLocked(!locked)
-                8 -> player.seekTo(0L)
-                9 -> showPlaylist()
-                10 -> showTranscodeMenu(currentItem())
+                5 -> setLocked(!locked)
+                6 -> player.seekTo(0L)
+                7 -> showPlaylist()
+                8 -> showTranscodeMenu(currentItem())
             }
         }.show()
     }
@@ -1005,7 +1069,7 @@ class PlayerActivity : AppCompatActivity() {
                     2 -> showTranscodeMenu(item)
                     3 -> {
                         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        cm.setPrimaryClip(ClipData.newPlainText("PocketPlayer 诊断", diagnostic))
+                        cm.setPrimaryClip(ClipData.newPlainText("WEG 诊断", diagnostic))
                         showHint("诊断信息已复制")
                     }
                     4 -> if (player.hasNextMediaItem()) player.seekToNextMediaItem() else finish()
@@ -1013,7 +1077,6 @@ class PlayerActivity : AppCompatActivity() {
             }.show()
     }
 
-    /** 解码失败时手动禁掉音频轨重新解码（与「音量锁」是两回事） */
     private fun retryWithoutAudio() {
         setAudioDisabled(true)
         player.prepare()
@@ -1027,13 +1090,6 @@ class PlayerActivity : AppCompatActivity() {
             .buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, disabled)
             .build()
-    }
-
-    private fun toggleAudioMute() {
-        setAudioDisabled(!audioMuted)
-        player.prepare()
-        player.playWhenReady = true
-        showHint(if (audioMuted) "已忽略音轨" else "已恢复音轨")
     }
 
     private fun openWithExternalPlayer(item: VideoItem?) {

@@ -15,13 +15,13 @@ class MarkerView(context: Context) : View(context) {
     var durationMs: Long = 0L
     var marks: List<Long> = emptyList()
 
-    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFFFB74D.toInt() }
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.FILL
     }
     private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFFFFB74D.toInt()
+        color = 0xFFE50914.toInt()
         style = Paint.Style.STROKE
         strokeWidth = 3f
     }

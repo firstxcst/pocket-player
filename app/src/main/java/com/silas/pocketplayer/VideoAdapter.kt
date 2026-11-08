@@ -60,7 +60,7 @@ class VideoAdapter(private val onClick: (VideoItem) -> Unit) :
     class RowView(ctx: Context) : LinearLayout(ctx) {
         val thumb = ImageView(ctx).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            setBackgroundColor(0xFF232A3A.toInt())
+            setBackgroundColor(0xFF1A1A1A.toInt())
             val radius = 10.dp(ctx).toFloat()
             outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(view: View, outline: Outline) {
@@ -71,18 +71,18 @@ class VideoAdapter(private val onClick: (VideoItem) -> Unit) :
         }
         val title = TextView(ctx).apply {
             textSize = 15f
-            setTextColor(themeColor(ctx, com.google.android.material.R.attr.colorOnSurface, Color.BLACK))
+            setTextColor(themeColor(ctx, com.google.android.material.R.attr.colorOnSurface, Color.WHITE))
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.MIDDLE
         }
         val meta = TextView(ctx).apply {
             textSize = 12f
-            setTextColor(themeColor(ctx, com.google.android.material.R.attr.colorOnSurfaceVariant, Color.GRAY))
+            setTextColor(themeColor(ctx, com.google.android.material.R.attr.colorOnSurfaceVariant, 0xFFA8A8A8.toInt()))
             maxLines = 1
         }
         val path = TextView(ctx).apply {
             textSize = 11f
-            setTextColor(themeColor(ctx, com.google.android.material.R.attr.colorOnSurfaceVariant, Color.GRAY))
+            setTextColor(themeColor(ctx, com.google.android.material.R.attr.colorOnSurfaceVariant, 0xFFA8A8A8.toInt()))
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.MIDDLE
         }

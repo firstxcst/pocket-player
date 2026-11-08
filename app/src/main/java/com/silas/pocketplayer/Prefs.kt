@@ -68,6 +68,13 @@ class Prefs(context: Context) {
         sp.edit().putString("marks_${path.hashCode()}", list.sorted().joinToString(",")).apply()
     }
 
+    fun removeMark(path: String, ms: Long) {
+        val left = marksOf(path).filter { it != ms }
+        val key = "marks_${path.hashCode()}"
+        if (left.isEmpty()) sp.edit().remove(key).apply()
+        else sp.edit().putString(key, left.joinToString(",")).apply()
+    }
+
     fun clearMarks(path: String) {
         sp.edit().remove("marks_${path.hashCode()}").apply()
     }

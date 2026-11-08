@@ -3,6 +3,7 @@ package com.silas.pocketplayer
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -25,7 +26,6 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.appbar.MaterialToolbar
-import com.google.android.material.color.DynamicColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import kotlinx.coroutines.Dispatchers
@@ -70,7 +70,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        DynamicColors.applyToActivitiesIfAvailable(application)
+        // 固定深色电影主题，不启用系统动态取色，保持奈飞式红黑配色
         prefs = Prefs(this)
         setContentView(buildUi())
         storageWatcher.register()
@@ -88,6 +88,8 @@ class MainActivity : AppCompatActivity() {
 
         toolbar = MaterialToolbar(this).apply {
             title = getString(R.string.app_name)
+            setTitleTextColor(Color.WHITE)
+            setBackgroundColor(0xFF0B0B0B.toInt())
             layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
         }
         toolbar.menu.add(0, MENU_SEARCH, 0, "搜索").apply {

@@ -11,7 +11,6 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.media.AudioManager
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -21,6 +20,7 @@ import android.os.Looper
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -64,15 +64,14 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
     private lateinit var gesture: GestureLayer
-    private lateinit var speedPicker: SpeedPicker
     private lateinit var topBar: LinearLayout
     private lateinit var bottomBar: LinearLayout
     private lateinit var titleView: TextView
     private lateinit var lockBtn: TextView
     private lateinit var volumeBtn: TextView
-    private lateinit var speedBtn: TextView
     private lateinit var playBtn: ImageButton
     private lateinit var seekBar: SeekBar
+    private lateinit var markerView: MarkerView
     private lateinit var timeNow: TextView
     private lateinit var timeTotal: TextView
     private lateinit var hintView: TextView
@@ -80,7 +79,6 @@ class PlayerActivity : AppCompatActivity() {
     private val seekStepViews = mutableListOf<TextView>()
 
     private val uiHandler = Handler(Looper.getMainLooper())
-    private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
     private var controlsVisible = true
     private var locked = false
@@ -90,24 +88,24 @@ class PlayerActivity : AppCompatActivity() {
     private var autoAudioRetryDone = false
     private var audioMuted = false
 
-    /** 音量锁：默认静音，必须点右上角解锁才有声音 */
+    /** 音量锁：默认静音，必须点右上角解锁；所有音量控制只在软件内生效 */
     private var volumeUnlocked = false
     private var volumeOn = false
+    private var softwareVolume = 0.7f
 
-    /** 快速定位（关键帧）能显著减少高码率 HEVC 拖动时的解码等待 */
+    /** 长按期间的临时 2x，松手恢复常驻倍速 */
+    private var tempSpeedActive = false
+
     private var fastSeek = true
     private var cachedDurationMs = 0L
     private var lastSeekHintMs = 0L
-
     private var brightness = 0.6f
-    private var volumeFraction = 0.5f
 
     private val hideRunnable = Runnable { hideControls() }
     private val hintRunnable = Runnable {
         hintView.animate().alpha(0f).setDuration(180)
             .withEndAction { hintView.visibility = View.GONE }.start()
     }
-    private val speedAutoHideRunnable = Runnable { speedPicker.hide() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -119,7 +117,7 @@ class PlayerActivity : AppCompatActivity() {
             hide(WindowInsetsCompat.Type.systemBars())
         }
         setContentView(buildUi())
-        initBrightnessVolume()
+        initBrightness()
         initPlayer()
         startTicker()
         showControls()
@@ -135,13 +133,38 @@ class PlayerActivity : AppCompatActivity() {
         })
     }
 
+    /** 音量键完全由本 Activity 消费，绝不修改系统媒体音量 */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_UP,
+            KeyEvent.KEYCODE_VOLUME_DOWN,
+            KeyEvent.KEYCODE_VOLUME_MUTE -> {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    when {
+                        !volumeUnlocked -> showHint("音量已锁定 · 点右上角解锁")
+                        event.keyCode == KeyEvent.KEYCODE_VOLUME_MUTE -> {
+                            volumeOn = !volumeOn
+                            applyVolumeState()
+                            showHint(if (volumeOn) "音量已恢复" else "已静音")
+                        }
+                        else -> adjustSoftwareVolume(
+                            if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) 0.1f else -0.1f
+                        )
+                    }
+                }
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     // ---------------------------------------------------------------- UI（纯代码构建，无 XML 膨胀开销）
 
     private fun buildUi(): View = FrameLayout(this).apply {
         setBackgroundColor(Color.BLACK)
 
         playerView = PlayerView(this@PlayerActivity).apply {
-            setUseController(false)         // 控制器自己写，交互才能完全按 MX/VLC 那套来
+            setUseController(false)
             setBackgroundColor(Color.BLACK)
         }
         addView(playerView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
@@ -176,22 +199,6 @@ class PlayerActivity : AppCompatActivity() {
         bottomBar = buildBottomBar()
         addView(bottomBar, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM))
 
-        speedPicker = SpeedPicker(this@PlayerActivity) { speed ->
-            setSpeed(speed)
-            speedPicker.hide()
-            scheduleHide()
-        }
-        addView(
-            speedPicker.view,
-            FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
-                .apply {
-                    topMargin = 96.dp(this@PlayerActivity)
-                    leftMargin = 24.dp(this@PlayerActivity)
-                    rightMargin = 24.dp(this@PlayerActivity)
-                }
-        )
-
-        // 右上角：音量解锁 + 画面锁定
         val topRight = LinearLayout(this@PlayerActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -257,7 +264,6 @@ class PlayerActivity : AppCompatActivity() {
             thumbTintList = ColorStateList.valueOf(Color.WHITE)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    // 拖动中只读缓存时长，不碰播放器线程，避免主线程被 IPC 拖住
                     if (fromUser && cachedDurationMs > 0) {
                         timeNow.text = formatTime(cachedDurationMs * p / 1000)
                     }
@@ -276,8 +282,17 @@ class PlayerActivity : AppCompatActivity() {
                 }
             })
         }
+        // 标记点覆盖在进度条上，透明可穿透
+        val seekFrame = FrameLayout(this@PlayerActivity).apply {
+            addView(seekBar, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.CENTER))
+            markerView = MarkerView(this@PlayerActivity)
+            addView(
+                markerView,
+                FrameLayout.LayoutParams(MATCH_PARENT, 14.dp(this@PlayerActivity), Gravity.CENTER)
+            )
+        }
         timeRow.addView(timeNow)
-        timeRow.addView(seekBar, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        timeRow.addView(seekFrame, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         timeRow.addView(timeTotal)
         addView(timeRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
@@ -292,7 +307,6 @@ class PlayerActivity : AppCompatActivity() {
         )
 
         playBtn = iconButton(android.R.drawable.ic_media_play, "播放") { togglePlay() }
-        // 档位直接排布：点一下就跳，不用先去菜单里选
         listOf(-30, -10, 10, 30).forEach { seconds ->
             if (seconds == 10) add(playBtn)
             val button = compactChip(if (seconds > 0) "+${seconds}s" else "${seconds}s") {
@@ -302,8 +316,7 @@ class PlayerActivity : AppCompatActivity() {
             seekStepViews += button
             add(button)
         }
-        speedBtn = compactChip(speedLabel(prefs.speed)) { openSpeedPicker() }
-        add(speedBtn)
+        add(compactChip("标记") { addMarkAtCurrent() })
         add(compactChip("更多") { showMoreMenu() })
         addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         highlightSeekStep(prefs.seekStepSec)
@@ -321,7 +334,6 @@ class PlayerActivity : AppCompatActivity() {
             setOnClickListener { onClick() }
         }
 
-    /** 紧凑胶囊按钮：控制条一行能放下 7 个 */
     private fun compactChip(text: String, onClick: () -> Unit) = TextView(this).apply {
         this.text = text
         setTextColor(Color.WHITE)
@@ -346,10 +358,8 @@ class PlayerActivity : AppCompatActivity() {
     // ---------------------------------------------------------------- 播放器
 
     private fun initPlayer() {
-        // lite / full 由 productFlavor 决定工厂实现：前者系统 MediaCodec，后者 NextLib FFmpeg 软解
         val renderers = createRenderersFactory(this)
         val loadControl = DefaultLoadControl.Builder()
-            // 本地文件不需要网络播放那种大缓冲：起播更快、内存更省
             .setBufferDurationsMs(1500, 5000, 500, 500)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -367,13 +377,12 @@ class PlayerActivity : AppCompatActivity() {
             true
         )
         player.setPlaybackSpeed(prefs.speed)
-        // 关键帧快速定位：高码率 / 10-bit HEVC 拖动时不再等到下一帧解码完
         player.setSeekParameters(
             if (fastSeek) SeekParameters.CLOSEST_SYNC else SeekParameters.DEFAULT
         )
         player.addListener(playerListener)
         playerView.player = player
-        applyVolumeState()      // 默认静音，必须解锁才有声音
+        applyVolumeState()
 
         val queue = PlaybackQueue.items
         if (queue.isEmpty()) {
@@ -397,6 +406,7 @@ class PlayerActivity : AppCompatActivity() {
                 cachedDurationMs = player.duration.coerceAtLeast(0)
                 updateTimes()
                 updateSeekSensitivity()
+                refreshMarkers()
             }
             if (state == Player.STATE_ENDED && !player.hasNextMediaItem()) showControls()
         }
@@ -409,13 +419,14 @@ class PlayerActivity : AppCompatActivity() {
             PlaybackQueue.index = player.currentMediaItemIndex
             autoAudioRetryDone = false
             cachedDurationMs = 0L
-            if (audioMuted) setAudioDisabled(false)   // 每个文件独立判断，切片恢复声音
+            endTempSpeed()
+            if (audioMuted) setAudioDisabled(false)
             updateTitle()
             updateTimes()
+            refreshMarkers()
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            // 第一次解码失败先自动忽略音轨重试，别让用户先吃一个弹窗
             if (!autoAudioRetryDone &&
                 error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
             ) {
@@ -446,7 +457,6 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun updateTimes() {
         if (!::player.isInitialized) return
-        // 拖动 / 滑动 seek 期间完全不碰 UI，避免高频重绘和播放器线程互抢
         if (seekDragging || seekGestureActive) return
         val dur = duration()
         val pos = player.currentPosition.coerceAtLeast(0)
@@ -461,7 +471,8 @@ class PlayerActivity : AppCompatActivity() {
         val item = currentItem()
         val size = player.videoSize
         val resolution = if (size.width > 0) "  ·  ${size.width}×${size.height}" else ""
-        titleView.text = (item?.title ?: "本地视频") + resolution
+        val speed = if (tempSpeedActive) "2x 临时" else speedLabel(prefs.speed)
+        titleView.text = (item?.title ?: "本地视频") + resolution + "  ·  $speed"
     }
 
     private fun updatePlayButton() {
@@ -526,30 +537,36 @@ class PlayerActivity : AppCompatActivity() {
         } else showControls()
     }
 
-    private fun showHint(text: String) {
+    /** sticky = true 时提示常驻（长按 2x 期间），不自动消失 */
+    private fun showHint(text: String, sticky: Boolean = false) {
         hintView.text = text
         hintView.alpha = 1f
         hintView.visibility = View.VISIBLE
         uiHandler.removeCallbacks(hintRunnable)
-        uiHandler.postDelayed(hintRunnable, Spec.HINT_DURATION_MS)
+        if (!sticky) uiHandler.postDelayed(hintRunnable, Spec.HINT_DURATION_MS)
     }
 
     private fun setLocked(value: Boolean) {
         locked = value
         lockBtn.text = if (value) "解锁" else "锁定"
         if (value) {
+            endTempSpeed()
             cancelHide()
-            speedPicker.hide()
             hideControls()
             showHint("已锁定，点右上角解锁")
         } else showControls()
     }
 
-    // ---------------------------------------------------------------- 音量锁
+    // ---------------------------------------------------------------- 音量锁（纯软件）
+
+    private fun initBrightness() {
+        val current = window.attributes.screenBrightness
+        brightness = if (current < 0f) 0.6f else current
+    }
 
     private fun applyVolumeState() {
         if (!::player.isInitialized || !::volumeBtn.isInitialized) return
-        player.volume = if (volumeUnlocked && volumeOn) 1f else 0f
+        player.volume = if (volumeUnlocked && volumeOn) softwareVolume else 0f
         volumeBtn.text = when {
             !volumeUnlocked -> "静音 · 解锁"
             volumeOn -> "音量已开"
@@ -573,7 +590,59 @@ class PlayerActivity : AppCompatActivity() {
         scheduleHide()
     }
 
-    // ---------------------------------------------------------------- 快进 / 倍速 / 亮度音量
+    private fun adjustSoftwareVolume(delta: Float) {
+        if (!volumeUnlocked) {
+            showHint("音量已锁定 · 点右上角解锁")
+            return
+        }
+        softwareVolume = (softwareVolume + delta).coerceIn(0f, 1f)
+        volumeOn = softwareVolume > 0f
+        applyVolumeState()
+        showHint("软件音量  ${(softwareVolume * 100).toInt()}%")
+    }
+
+    private fun changeBrightness(delta: Float) {
+        brightness = (brightness + delta).coerceIn(0.02f, 1f)
+        window.attributes = window.attributes.also { it.screenBrightness = brightness }
+        showHint("亮度  ${(brightness * 100).toInt()}%")
+    }
+
+    // ---------------------------------------------------------------- 倍速 / 快进 / 标记
+
+    /** 长按画面：临时 2x，不改变常驻倍速 */
+    private fun beginTempSpeed() {
+        if (locked) return
+        tempSpeedActive = true
+        player.setPlaybackParameters(PlaybackParameters(2f))
+        showHint("2x 播放中 · 松手恢复", sticky = true)
+        updateTitle()
+    }
+
+    private fun endTempSpeed() {
+        if (!tempSpeedActive) return
+        tempSpeedActive = false
+        player.setPlaybackParameters(PlaybackParameters(prefs.speed))
+        showHint("已恢复 ${speedLabel(prefs.speed)}")
+        updateTitle()
+    }
+
+    private fun setSpeed(speed: Float) {
+        prefs.speed = speed
+        if (!tempSpeedActive) player.setPlaybackParameters(PlaybackParameters(speed))
+        updateTitle()
+        showHint("倍速  ${speedLabel(speed)}")
+    }
+
+    private fun showSpeedDialog() {
+        val labels = Spec.SPEEDS.map { speedLabel(it) }.toTypedArray()
+        val checked = Spec.SPEEDS.indexOfFirst { it == prefs.speed }.coerceAtLeast(0)
+        MaterialAlertDialogBuilder(this)
+            .setTitle("播放倍速 · 长按画面可临时 2x")
+            .setSingleChoiceItems(labels, checked) { dialog, which ->
+                setSpeed(Spec.SPEEDS[which])
+                dialog.dismiss()
+            }.show()
+    }
 
     private fun onSeekStepClick(seconds: Int) {
         if (locked) {
@@ -601,75 +670,71 @@ class PlayerActivity : AppCompatActivity() {
         scheduleHide()
     }
 
-    private fun setSpeed(speed: Float) {
-        player.setPlaybackParameters(PlaybackParameters(speed))
-        prefs.speed = speed
-        speedBtn.text = speedLabel(speed)
-        showHint("倍速  ${speedLabel(speed)}")
+    private fun addMarkAtCurrent() {
+        val item = currentItem() ?: return
+        val pos = player.currentPosition
+        prefs.addMark(item.path, pos)
+        refreshMarkers()
+        showHint("已标记 ${formatTime(pos)}")
+        scheduleHide()
     }
 
-    private fun openSpeedPicker() {
-        cancelHide()
-        speedPicker.show(prefs.speed)
-        scheduleSpeedAutoHide()
+    private fun refreshMarkers() {
+        if (!::markerView.isInitialized || !::player.isInitialized) return
+        val item = currentItem()
+        markerView.durationMs = duration()
+        markerView.marks = item?.let { prefs.marksOf(it.path) } ?: emptyList()
+        markerView.refresh()
     }
 
-    private fun scheduleSpeedAutoHide() {
-        uiHandler.removeCallbacks(speedAutoHideRunnable)
-        uiHandler.postDelayed(speedAutoHideRunnable, Spec.SPEED_PICKER_AUTO_HIDE_MS)
-    }
-
-    private fun initBrightnessVolume() {
-        val current = window.attributes.screenBrightness
-        brightness = if (current < 0f) 0.6f else current
-        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-        volumeFraction = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max
-    }
-
-    private fun changeBrightness(delta: Float) {
-        brightness = (brightness + delta).coerceIn(0.02f, 1f)
-        window.attributes = window.attributes.also { it.screenBrightness = brightness }
-        showHint("亮度  ${(brightness * 100).toInt()}%")
-    }
-
-    private fun changeVolume(delta: Float) {
-        if (!volumeUnlocked || !volumeOn) {
-            showHint("音量已锁定 · 点右上角解锁")
+    private fun showMarksDialog() {
+        val item = currentItem() ?: return
+        val list = prefs.marksOf(item.path)
+        if (list.isEmpty()) {
+            showHint("这个视频还没有标记，点底栏「标记」添加")
             return
         }
-        volumeFraction = (volumeFraction + delta).coerceIn(0f, 1f)
-        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val index = (volumeFraction * max).toInt().coerceIn(0, max)
-        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, index, 0)
-        showHint("音量  $index / $max")
+        val labels = list.map { "跳到 ${formatTime(it)}" }.toTypedArray()
+        MaterialAlertDialogBuilder(this)
+            .setTitle("关键节点（${list.size}）")
+            .setItems(labels) { _, which ->
+                player.seekTo(list[which])
+                updateTimes()
+            }
+            .setNeutralButton("清除全部") { _, _ ->
+                prefs.clearMarks(item.path)
+                refreshMarkers()
+                showHint("标记已清除")
+            }.show()
+    }
+
+    private fun switchVideo(next: Boolean) {
+        val has = if (next) player.hasNextMediaItem() else player.hasPreviousMediaItem()
+        if (!has) {
+            showHint(if (next) "已经是最后一个" else "已经是第一个")
+            return
+        }
+        endTempSpeed()
+        if (next) player.seekToNextMediaItem() else player.seekToPreviousMediaItem()
+        showHint(if (next) "下一个视频" else "上一个视频")
     }
 
     private val gestureCallback = object : GestureLayer.Callback {
-        override fun onSingleTap() {
-            if (speedPicker.isShowing) {
-                speedPicker.hide()
-                return
-            }
-            toggleControls()
-        }
+        override fun onSingleTap() = toggleControls()
 
         override fun onDoubleTap(forward: Boolean) {
             if (locked) return
             seekBy((if (forward) 1 else -1) * prefs.seekStepSec * 1000L)
         }
 
-        override fun onLongPressBegin(x: Float, y: Float) {
+        override fun onDoubleTapCenter() {
             if (locked) return
-            cancelHide()
-            speedPicker.show(prefs.speed)
+            togglePlay()
         }
 
-        override fun onLongPressMove(x: Float, y: Float) = speedPicker.highlightAt(x, y)
+        override fun onLongPressBegin() = beginTempSpeed()
 
-        override fun onLongPressEnd() {
-            if (!speedPicker.isShowing) return
-            if (speedPicker.finishByGesture()) scheduleHide() else scheduleSpeedAutoHide()
-        }
+        override fun onLongPressEnd() = endTempSpeed()
 
         override fun onSeekStart() {
             if (locked) return
@@ -683,7 +748,6 @@ class PlayerActivity : AppCompatActivity() {
             if (locked) return
             val dur = duration()
             pendingSeekMs = (pendingSeekMs + deltaMs).coerceIn(0L, dur)
-            // 高频 MOVE 只按 80ms 节流刷新 UI，位置仍逐像素累加，不丢精度
             val now = System.currentTimeMillis()
             if (now - lastSeekHintMs >= 80L) {
                 lastSeekHintMs = now
@@ -707,7 +771,11 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         override fun onVolumeDelta(delta: Float) {
-            if (!locked) changeVolume(delta)
+            if (!locked) adjustSoftwareVolume(delta)
+        }
+
+        override fun onSwitchVideo(next: Boolean) {
+            if (!locked) switchVideo(next)
         }
     }
 
@@ -725,36 +793,42 @@ class PlayerActivity : AppCompatActivity() {
             }.show()
     }
 
+    private fun toggleFastSeek() {
+        fastSeek = !fastSeek
+        player.setSeekParameters(
+            if (fastSeek) SeekParameters.CLOSEST_SYNC else SeekParameters.DEFAULT
+        )
+        showHint(if (fastSeek) "快速定位（关键帧）" else "精确定位（较慢）")
+    }
+
     private fun showMoreMenu() {
         val labels = arrayOf(
-            "转码 / 导出",
+            "播放倍速（当前 ${speedLabel(prefs.speed)}）",
+            "标记列表（${currentItem()?.let { prefs.marksOf(it.path).size } ?: 0}）",
             "双击步长（${prefs.seekStepSec}s）",
             if (fastSeek) "改为精确定位（较慢）" else "改为快速定位（推荐）",
             if (volumeUnlocked) "静音 / 恢复音量" else "解锁音量",
             if (audioMuted) "重新启用音轨" else "静音播放（跳过不支持的音轨）",
             if (locked) "解锁画面" else "锁定画面",
             "从头播放",
-            "播放列表（${PlaybackQueue.items.size} 项）"
+            "播放列表（${PlaybackQueue.items.size} 项）",
+            "转码 / 导出"
         )
         MaterialAlertDialogBuilder(this).setItems(labels) { _, which ->
             when (which) {
-                0 -> showTranscodeMenu(currentItem())
-                1 -> showStepDialog()
-                2 -> {
-                    fastSeek = !fastSeek
-                    player.setSeekParameters(
-                        if (fastSeek) SeekParameters.CLOSEST_SYNC else SeekParameters.DEFAULT
-                    )
-                    showHint(if (fastSeek) "快速定位（关键帧）" else "精确定位（较慢）")
-                }
-                3 -> if (volumeUnlocked) {
+                0 -> showSpeedDialog()
+                1 -> showMarksDialog()
+                2 -> showStepDialog()
+                3 -> toggleFastSeek()
+                4 -> if (volumeUnlocked) {
                     volumeOn = !volumeOn
                     applyVolumeState()
                 } else onVolumeButtonClick()
-                4 -> toggleAudioMute()
-                5 -> setLocked(!locked)
-                6 -> player.seekTo(0L)
-                7 -> showPlaylist()
+                5 -> toggleAudioMute()
+                6 -> setLocked(!locked)
+                7 -> player.seekTo(0L)
+                8 -> showPlaylist()
+                9 -> showTranscodeMenu(currentItem())
             }
         }.show()
     }
@@ -844,7 +918,6 @@ class PlayerActivity : AppCompatActivity() {
         showHint(if (audioMuted) "已忽略音轨" else "已恢复音轨")
     }
 
-    /** 交给系统 / 第三方播放器（MX Player、VLC 等带软解的） */
     private fun openWithExternalPlayer(item: VideoItem?) {
         if (item == null) return
         val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -926,12 +999,14 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onPause() {
         saveProgress()
+        endTempSpeed()
         if (::player.isInitialized && player.isPlaying) player.pause()
         super.onPause()
     }
 
     override fun onDestroy() {
         saveProgress()
+        endTempSpeed()
         uiHandler.removeCallbacksAndMessages(null)
         playerView.player = null
         player.release()

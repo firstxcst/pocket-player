@@ -54,12 +54,14 @@ object UpdateChecker {
                     // lite 用户下 PocketPlayer-release.apk，full 用户下 PocketPlayer-full.apk
                     val score = when {
                         flavor == "full" && name.equals("PocketPlayer-full.apk", true) -> 3
-                        flavor != "full" && name.equals("PocketPlayer-release.apk", true) -> 3
+                        // full 用户绝不自动降级到轻量版；找不到专属包就跳 Release 页面手动选
+                        flavor == "full" -> 0
+                        name.equals("PocketPlayer-release.apk", true) -> 3
                         name.contains("release", true) && !name.contains("full", true) -> 2
                         !name.contains("debug", true) -> 1
                         else -> 0
                     }
-                    if (score > bestScore) {
+                    if (score > 0 && score > bestScore) {
                         bestScore = score
                         apkUrl = url
                     }

@@ -1,6 +1,7 @@
 package com.silas.pocketplayer
 
 import android.content.Context
+import kotlin.math.abs
 
 object Spec {
     /** 双击快进/快退可选档位（秒） */
@@ -46,5 +47,23 @@ class Prefs(context: Context) {
     fun positionOf(path: String): Long = sp.getLong("pos_${path.hashCode()}", 0L)
     fun savePosition(path: String, ms: Long) {
         sp.edit().putLong("pos_${path.hashCode()}", ms).apply()
+    }
+
+    /** 关键节点标记：按视频路径存毫秒列表，逗号分隔，不引数据库 */
+    fun marksOf(path: String): List<Long> =
+        sp.getString("marks_${path.hashCode()}", "").orEmpty()
+            .split(',')
+            .mapNotNull { it.toLongOrNull() }
+            .sorted()
+
+    fun addMark(path: String, ms: Long) {
+        val list = marksOf(path).toMutableList()
+        if (list.any { abs(it - ms) < 1500L }) return   // 1.5 秒内不重复打点
+        list += ms
+        sp.edit().putString("marks_${path.hashCode()}", list.sorted().joinToString(",")).apply()
+    }
+
+    fun clearMarks(path: String) {
+        sp.edit().remove("marks_${path.hashCode()}").apply()
     }
 }

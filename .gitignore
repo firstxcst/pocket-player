@@ -1,6 +1,7 @@
 *.iml
 .gradle/
 .idea/
+.kotlin/
 .cxx/
 build/
 captures/

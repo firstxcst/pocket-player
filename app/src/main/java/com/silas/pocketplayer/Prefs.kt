@@ -38,6 +38,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("all_files_asked", false)
         set(v) { sp.edit().putBoolean("all_files_asked", v).apply() }
 
+    /** 记住横屏偏好，下次打开播放页直接横屏 */
+    var landscapePreferred: Boolean
+        get() = sp.getBoolean("landscape", false)
+        set(v) { sp.edit().putBoolean("landscape", v).apply() }
+
     /** 启动时静默检查更新的节流，6 小时内不重复请求 GitHub */
     var lastUpdateCheckMs: Long
         get() = sp.getLong("last_update_check", 0L)

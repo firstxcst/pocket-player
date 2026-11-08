@@ -48,7 +48,9 @@ class VideoAdapter(private val onClick: (VideoItem) -> Unit) :
         fun bind(item: VideoItem, onClick: (VideoItem) -> Unit) {
             val row = itemView as RowView
             row.title.text = item.title
-            row.meta.text = "${if (item.durationMs > 0) formatTime(item.durationMs) else "--:--"}   ·   ${formatSize(item.sizeBytes)}"
+            val ext = item.path.substringAfterLast('.', "").lowercase()
+            val risk = if (ext in RISKY_EXT) "   ·   兼容风险" else ""
+            row.meta.text = "${if (item.durationMs > 0) formatTime(item.durationMs) else "--:--"}   ·   ${formatSize(item.sizeBytes)}$risk"
             row.path.text = item.path.substringBeforeLast('/', item.path)
             Thumbnails.load(row.context, item, row.thumb)
             itemView.setOnClickListener { onClick(item) }
@@ -104,6 +106,9 @@ class VideoAdapter(private val onClick: (VideoItem) -> Unit) :
         }
     }
 }
+
+/** 系统 MediaCodec / extractor 常见兼容雷区，列表里提前标注，别让用户点进去才踩坑 */
+private val RISKY_EXT = setOf("rm", "rmvb", "wmv", "asf", "vob", "avi", "flv")
 
 private fun themeColor(ctx: Context, attr: Int, fallback: Int): Int {
     val tv = TypedValue()

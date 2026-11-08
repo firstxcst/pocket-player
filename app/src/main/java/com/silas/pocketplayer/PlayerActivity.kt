@@ -2,7 +2,10 @@
 
 package com.silas.pocketplayer
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
@@ -11,6 +14,7 @@ import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -648,23 +652,71 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun handlePlaybackError(error: PlaybackException) {
-        val ext = currentItem()?.path?.substringAfterLast('.', "")?.lowercase().orEmpty()
+        val item = currentItem()
+        val ext = item?.path?.substringAfterLast('.', "")?.lowercase().orEmpty()
         val legacy = ext in setOf("rm", "rmvb", "wmv", "asf", "vob", "avi", "flv")
-        val message = if (legacy) {
-            "设备不认识这个容器/编码。可以先试「转码为兼容 MP4」；" +
-                "RMVB / WMV 这类老格式连容器都解不开，需要额外引入 FFmpeg 软解扩展（体积会明显变大）。"
-        } else {
-            "播放失败：${error.errorCodeName}\n可尝试转码为 H.264 / AAC 的 MP4 后再播放。"
+        val size = player.videoSize
+        val resolution = if (size.width > 0) "  ·  ${size.width}×${size.height}" else ""
+        val cause = error.cause?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "未提供"
+        val diagnostic = buildString {
+            append("文件：${item?.title ?: "未知"}\n")
+            append("格式：${item?.mimeType ?: ext.ifBlank { "未知" }}$resolution\n")
+            append("错误：${error.errorCodeName} (${error.errorCode})\n")
+            append("原因：$cause\n")
+            append("设备：${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         }
+        val advice = if (legacy) {
+            "\n\n这个容器的 extractor 系统不认，转码通常也救不了；建议交给带软解的播放器，或开启 FFmpeg 扩展。"
+        } else {
+            "\n\n最常见的原因是音轨编码（AC3 / DTS 等）设备不支持，视频轨本身没问题——先试「忽略音轨重试」，最快。"
+        }
+        val actions = arrayOf(
+            "忽略音轨重试",
+            "用其他播放器打开",
+            "转码为兼容 MP4",
+            "复制诊断信息",
+            "播放下一个",
+            "关闭"
+        )
         MaterialAlertDialogBuilder(this)
             .setTitle("无法解码")
-            .setMessage(message)
-            .setPositiveButton("转码") { _, _ -> showTranscodeMenu(currentItem()) }
-            .setNegativeButton("下一个") { _, _ ->
-                if (player.hasNextMediaItem()) player.seekToNextMediaItem() else finish()
-            }
-            .setNeutralButton("关闭", null)
-            .show()
+            .setMessage(diagnostic + advice)
+            .setItems(actions) { _, which ->
+                when (which) {
+                    0 -> retryWithoutAudio()
+                    1 -> openWithExternalPlayer(item)
+                    2 -> showTranscodeMenu(item)
+                    3 -> {
+                        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("PocketPlayer 诊断", diagnostic))
+                        showHint("诊断信息已复制")
+                    }
+                    4 -> if (player.hasNextMediaItem()) player.seekToNextMediaItem() else finish()
+                }
+            }.show()
+    }
+
+    /** 多数「解码失败」其实是音轨编码不认，禁掉音频轨直接重解码 */
+    private fun retryWithoutAudio() {
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+            .build()
+        player.prepare()
+        player.playWhenReady = true
+        showHint("已忽略音轨，重新解码中…")
+    }
+
+    /** 交给系统 / 第三方播放器（MX Player、VLC 等带软解的） */
+    private fun openWithExternalPlayer(item: VideoItem?) {
+        if (item == null) return
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(item.uri, item.mimeType?.takeIf { it.startsWith("video/") } ?: "video/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { startActivity(intent) }
+            .onFailure { showHint("没有能打开该视频的播放器，或读权限未授予") }
     }
 
     private fun showTranscodeMenu(item: VideoItem?) {

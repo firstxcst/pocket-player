@@ -47,8 +47,8 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.ui.PlayerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.progressindicator.CircularProgressIndicator
@@ -69,7 +69,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var bottomBar: LinearLayout
     private lateinit var titleView: TextView
     private lateinit var lockBtn: TextView
-    private lateinit var stepBtn: TextView
+    private lateinit var volumeBtn: TextView
     private lateinit var speedBtn: TextView
     private lateinit var playBtn: ImageButton
     private lateinit var seekBar: SeekBar
@@ -77,6 +77,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var timeTotal: TextView
     private lateinit var hintView: TextView
     private lateinit var buffering: CircularProgressIndicator
+    private val seekStepViews = mutableListOf<TextView>()
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
@@ -88,6 +89,16 @@ class PlayerActivity : AppCompatActivity() {
     private var seekGestureActive = false
     private var autoAudioRetryDone = false
     private var audioMuted = false
+
+    /** 音量锁：默认静音，必须点右上角解锁才有声音 */
+    private var volumeUnlocked = false
+    private var volumeOn = false
+
+    /** 快速定位（关键帧）能显著减少高码率 HEVC 拖动时的解码等待 */
+    private var fastSeek = true
+    private var cachedDurationMs = 0L
+    private var lastSeekHintMs = 0L
+
     private var brightness = 0.6f
     private var volumeFraction = 0.5f
 
@@ -180,17 +191,20 @@ class PlayerActivity : AppCompatActivity() {
                 }
         )
 
-        lockBtn = TextView(this@PlayerActivity).apply {
-            text = "锁定"
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            gravity = Gravity.CENTER
-            background = chipBg(0x66000000)
-            setPadding(12.dp(this@PlayerActivity), 8.dp(this@PlayerActivity), 12.dp(this@PlayerActivity), 8.dp(this@PlayerActivity))
-            setOnClickListener { setLocked(!locked) }
+        // 右上角：音量解锁 + 画面锁定
+        val topRight = LinearLayout(this@PlayerActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
+        volumeBtn = compactChip("静音 · 解锁") { onVolumeButtonClick() }
+        lockBtn = compactChip("锁定") { setLocked(!locked) }
+        topRight.addView(
+            volumeBtn,
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 8.dp(this@PlayerActivity) }
+        )
+        topRight.addView(lockBtn)
         addView(
-            lockBtn,
+            topRight,
             FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
                 topMargin = 16.dp(this@PlayerActivity)
                 marginEnd = 16.dp(this@PlayerActivity)
@@ -205,7 +219,7 @@ class PlayerActivity : AppCompatActivity() {
             GradientDrawable.Orientation.TOP_BOTTOM,
             intArrayOf(0xDD000000.toInt(), 0x00000000)
         )
-        setPadding(8.dp(this@PlayerActivity), 16.dp(this@PlayerActivity), 88.dp(this@PlayerActivity), 24.dp(this@PlayerActivity))
+        setPadding(8.dp(this@PlayerActivity), 16.dp(this@PlayerActivity), 190.dp(this@PlayerActivity), 24.dp(this@PlayerActivity))
         addView(iconButton(android.R.drawable.ic_menu_revert, "返回") { finish() })
         titleView = TextView(this@PlayerActivity).apply {
             setTextColor(Color.WHITE)
@@ -243,7 +257,10 @@ class PlayerActivity : AppCompatActivity() {
             thumbTintList = ColorStateList.valueOf(Color.WHITE)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    if (fromUser && player.duration > 0) timeNow.text = formatTime(player.duration * p / 1000)
+                    // 拖动中只读缓存时长，不碰播放器线程，避免主线程被 IPC 拖住
+                    if (fromUser && cachedDurationMs > 0) {
+                        timeNow.text = formatTime(cachedDurationMs * p / 1000)
+                    }
                 }
                 override fun onStartTrackingTouch(sb: SeekBar?) {
                     seekDragging = true
@@ -251,8 +268,9 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 override fun onStopTrackingTouch(sb: SeekBar?) {
                     seekDragging = false
-                    val dur = player.duration
-                    if (dur > 0) player.seekTo(dur * (sb?.progress ?: 0) / 1000)
+                    if (cachedDurationMs > 0) {
+                        player.seekTo(cachedDurationMs * (sb?.progress ?: 0) / 1000)
+                    }
                     updateTimes()
                     scheduleHide()
                 }
@@ -270,18 +288,25 @@ class PlayerActivity : AppCompatActivity() {
         }
         fun add(view: View) = row.addView(
             view,
-            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 6.dp(this@PlayerActivity) }
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 3.dp(this@PlayerActivity) }
         )
-        stepBtn = textButton("${prefs.seekStepSec}s") { showStepDialog() }
-        speedBtn = textButton(speedLabel(prefs.speed)) { openSpeedPicker() }
-        add(stepBtn)
-        add(iconButton(android.R.drawable.ic_media_rew, "快退") { seekBy(-prefs.seekStepSec * 1000L) })
+
         playBtn = iconButton(android.R.drawable.ic_media_play, "播放") { togglePlay() }
-        add(playBtn)
-        add(iconButton(android.R.drawable.ic_media_ff, "快进") { seekBy(prefs.seekStepSec * 1000L) })
+        // 档位直接排布：点一下就跳，不用先去菜单里选
+        listOf(-30, -10, 10, 30).forEach { seconds ->
+            if (seconds == 10) add(playBtn)
+            val button = compactChip(if (seconds > 0) "+${seconds}s" else "${seconds}s") {
+                onSeekStepClick(seconds)
+            }
+            button.tag = seconds
+            seekStepViews += button
+            add(button)
+        }
+        speedBtn = compactChip(speedLabel(prefs.speed)) { openSpeedPicker() }
         add(speedBtn)
-        add(textButton("更多") { showMoreMenu() })
+        add(compactChip("更多") { showMoreMenu() })
         addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        highlightSeekStep(prefs.seekStepSec)
     }
 
     private fun iconButton(icon: Int, desc: String, onClick: () -> Unit) =
@@ -296,14 +321,14 @@ class PlayerActivity : AppCompatActivity() {
             setOnClickListener { onClick() }
         }
 
-    private fun textButton(text: String, onClick: () -> Unit) = TextView(this).apply {
+    /** 紧凑胶囊按钮：控制条一行能放下 7 个 */
+    private fun compactChip(text: String, onClick: () -> Unit) = TextView(this).apply {
         this.text = text
         setTextColor(Color.WHITE)
-        textSize = 13f
+        textSize = 12f
         gravity = Gravity.CENTER
-        minWidth = 52.dp(this@PlayerActivity)
         background = chipBg(0x33FFFFFF)
-        setPadding(10.dp(this@PlayerActivity), 8.dp(this@PlayerActivity), 10.dp(this@PlayerActivity), 8.dp(this@PlayerActivity))
+        setPadding(8.dp(this@PlayerActivity), 8.dp(this@PlayerActivity), 8.dp(this@PlayerActivity), 8.dp(this@PlayerActivity))
         setOnClickListener { onClick() }
     }
 
@@ -342,8 +367,13 @@ class PlayerActivity : AppCompatActivity() {
             true
         )
         player.setPlaybackSpeed(prefs.speed)
+        // 关键帧快速定位：高码率 / 10-bit HEVC 拖动时不再等到下一帧解码完
+        player.setSeekParameters(
+            if (fastSeek) SeekParameters.CLOSEST_SYNC else SeekParameters.DEFAULT
+        )
         player.addListener(playerListener)
         playerView.player = player
+        applyVolumeState()      // 默认静音，必须解锁才有声音
 
         val queue = PlaybackQueue.items
         if (queue.isEmpty()) {
@@ -364,6 +394,7 @@ class PlayerActivity : AppCompatActivity() {
         override fun onPlaybackStateChanged(state: Int) {
             buffering.visibility = if (state == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
             if (state == Player.STATE_READY) {
+                cachedDurationMs = player.duration.coerceAtLeast(0)
                 updateTimes()
                 updateSeekSensitivity()
             }
@@ -377,13 +408,14 @@ class PlayerActivity : AppCompatActivity() {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             PlaybackQueue.index = player.currentMediaItemIndex
             autoAudioRetryDone = false
+            cachedDurationMs = 0L
             if (audioMuted) setAudioDisabled(false)   // 每个文件独立判断，切片恢复声音
             updateTitle()
             updateTimes()
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            // 第一次解码失败：大概率是 AC3/DTS 音轨，先自动静音重试，别让用户先吃一个弹窗
+            // 第一次解码失败先自动忽略音轨重试，别让用户先吃一个弹窗
             if (!autoAudioRetryDone &&
                 error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
             ) {
@@ -409,16 +441,19 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun duration(): Long =
+        if (cachedDurationMs > 0) cachedDurationMs else player.duration.coerceAtLeast(0)
+
     private fun updateTimes() {
         if (!::player.isInitialized) return
-        val dur = player.duration.coerceAtLeast(0)
+        // 拖动 / 滑动 seek 期间完全不碰 UI，避免高频重绘和播放器线程互抢
+        if (seekDragging || seekGestureActive) return
+        val dur = duration()
         val pos = player.currentPosition.coerceAtLeast(0)
         timeTotal.text = formatTime(dur)
-        if (!seekDragging && !seekGestureActive) {
-            timeNow.text = formatTime(pos)
-            seekBar.progress = if (dur > 0) (pos * 1000 / dur).toInt() else 0
-            seekBar.secondaryProgress = if (dur > 0) (player.bufferedPosition * 1000 / dur).toInt() else 0
-        }
+        timeNow.text = formatTime(pos)
+        seekBar.progress = if (dur > 0) (pos * 1000 / dur).toInt() else 0
+        seekBar.secondaryProgress = if (dur > 0) (player.bufferedPosition * 1000 / dur).toInt() else 0
     }
 
     private fun updateTitle() {
@@ -447,10 +482,8 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun updateSeekSensitivity() {
         gesture.post {
-            gesture.msPerPixel = (
-                player.duration.coerceAtLeast(0) /
-                    (resources.displayMetrics.widthPixels * 2f)
-                ).coerceIn(20f, 600f)
+            gesture.msPerPixel = (duration() / (resources.displayMetrics.widthPixels * 2f))
+                .coerceIn(20f, 600f)
         }
     }
 
@@ -512,10 +545,55 @@ class PlayerActivity : AppCompatActivity() {
         } else showControls()
     }
 
+    // ---------------------------------------------------------------- 音量锁
+
+    private fun applyVolumeState() {
+        if (!::player.isInitialized || !::volumeBtn.isInitialized) return
+        player.volume = if (volumeUnlocked && volumeOn) 1f else 0f
+        volumeBtn.text = when {
+            !volumeUnlocked -> "静音 · 解锁"
+            volumeOn -> "音量已开"
+            else -> "已静音 · 恢复"
+        }
+    }
+
+    private fun onVolumeButtonClick() {
+        if (locked) {
+            showHint("请先点右上角解锁画面")
+            return
+        }
+        if (!volumeUnlocked) {
+            volumeUnlocked = true
+            volumeOn = true
+        } else {
+            volumeOn = !volumeOn
+        }
+        applyVolumeState()
+        showHint(if (volumeOn) "音量已解锁" else "已静音")
+        scheduleHide()
+    }
+
     // ---------------------------------------------------------------- 快进 / 倍速 / 亮度音量
 
+    private fun onSeekStepClick(seconds: Int) {
+        if (locked) {
+            showHint("已锁定 · 点右上角解锁")
+            return
+        }
+        prefs.seekStepSec = abs(seconds)
+        highlightSeekStep(abs(seconds))
+        seekBy(seconds * 1000L)
+    }
+
+    private fun highlightSeekStep(seconds: Int) {
+        seekStepViews.forEach { view ->
+            val selected = (view.tag as? Int)?.let { abs(it) == seconds } == true
+            view.background = chipBg(if (selected) 0xFF2E6BE6.toInt() else 0x33FFFFFF)
+        }
+    }
+
     private fun seekBy(deltaMs: Long) {
-        val dur = player.duration.coerceAtLeast(0)
+        val dur = duration()
         val target = (player.currentPosition + deltaMs).coerceIn(0L, dur.coerceAtLeast(1))
         player.seekTo(target)
         val sign = if (deltaMs > 0) "+" else "-"
@@ -555,6 +633,10 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun changeVolume(delta: Float) {
+        if (!volumeUnlocked || !volumeOn) {
+            showHint("音量已锁定 · 点右上角解锁")
+            return
+        }
         volumeFraction = (volumeFraction + delta).coerceIn(0f, 1f)
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         val index = (volumeFraction * max).toInt().coerceIn(0, max)
@@ -593,16 +675,22 @@ class PlayerActivity : AppCompatActivity() {
             if (locked) return
             pendingSeekMs = player.currentPosition
             seekGestureActive = true
+            lastSeekHintMs = 0L
             cancelHide()
         }
 
         override fun onSeekDelta(deltaMs: Long) {
             if (locked) return
-            val dur = player.duration.coerceAtLeast(0)
+            val dur = duration()
             pendingSeekMs = (pendingSeekMs + deltaMs).coerceIn(0L, dur)
-            showHint("${formatTime(pendingSeekMs)} / ${formatTime(dur)}")
-            seekBar.progress = if (dur > 0) (pendingSeekMs * 1000 / dur).toInt() else 0
-            timeNow.text = formatTime(pendingSeekMs)
+            // 高频 MOVE 只按 80ms 节流刷新 UI，位置仍逐像素累加，不丢精度
+            val now = System.currentTimeMillis()
+            if (now - lastSeekHintMs >= 80L) {
+                lastSeekHintMs = now
+                showHint("${formatTime(pendingSeekMs)} / ${formatTime(dur)}")
+                seekBar.progress = if (dur > 0) (pendingSeekMs * 1000 / dur).toInt() else 0
+                timeNow.text = formatTime(pendingSeekMs)
+            }
         }
 
         override fun onSeekCommit() {
@@ -632,7 +720,7 @@ class PlayerActivity : AppCompatActivity() {
             .setTitle("双击快进 / 快退步长")
             .setSingleChoiceItems(labels, checked) { dialog, which ->
                 prefs.seekStepSec = Spec.SEEK_STEPS[which]
-                stepBtn.text = "${Spec.SEEK_STEPS[which]}s"
+                highlightSeekStep(Spec.SEEK_STEPS[which])
                 dialog.dismiss()
             }.show()
     }
@@ -640,7 +728,9 @@ class PlayerActivity : AppCompatActivity() {
     private fun showMoreMenu() {
         val labels = arrayOf(
             "转码 / 导出",
-            "快进步长",
+            "双击步长（${prefs.seekStepSec}s）",
+            if (fastSeek) "改为精确定位（较慢）" else "改为快速定位（推荐）",
+            if (volumeUnlocked) "静音 / 恢复音量" else "解锁音量",
             if (audioMuted) "重新启用音轨" else "静音播放（跳过不支持的音轨）",
             if (locked) "解锁画面" else "锁定画面",
             "从头播放",
@@ -650,10 +740,21 @@ class PlayerActivity : AppCompatActivity() {
             when (which) {
                 0 -> showTranscodeMenu(currentItem())
                 1 -> showStepDialog()
-                2 -> toggleAudioMute()
-                3 -> setLocked(!locked)
-                4 -> player.seekTo(0L)
-                5 -> showPlaylist()
+                2 -> {
+                    fastSeek = !fastSeek
+                    player.setSeekParameters(
+                        if (fastSeek) SeekParameters.CLOSEST_SYNC else SeekParameters.DEFAULT
+                    )
+                    showHint(if (fastSeek) "快速定位（关键帧）" else "精确定位（较慢）")
+                }
+                3 -> if (volumeUnlocked) {
+                    volumeOn = !volumeOn
+                    applyVolumeState()
+                } else onVolumeButtonClick()
+                4 -> toggleAudioMute()
+                5 -> setLocked(!locked)
+                6 -> player.seekTo(0L)
+                7 -> showPlaylist()
             }
         }.show()
     }
@@ -720,7 +821,7 @@ class PlayerActivity : AppCompatActivity() {
             }.show()
     }
 
-    /** 多数「解码失败」其实是音轨编码不认，禁掉音频轨直接重解码 */
+    /** 解码失败时禁掉音频轨重新解码（与「音量锁」是两回事） */
     private fun retryWithoutAudio() {
         setAudioDisabled(true)
         player.prepare()
@@ -740,7 +841,7 @@ class PlayerActivity : AppCompatActivity() {
         setAudioDisabled(!audioMuted)
         player.prepare()
         player.playWhenReady = true
-        showHint(if (audioMuted) "已静音播放" else "已恢复音轨")
+        showHint(if (audioMuted) "已忽略音轨" else "已恢复音轨")
     }
 
     /** 交给系统 / 第三方播放器（MX Player、VLC 等带软解的） */

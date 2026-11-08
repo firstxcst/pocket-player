@@ -11,9 +11,18 @@ android {
         applicationId = "com.silas.pocketplayer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.2"
-        // 无 native 库：播放完全走系统 MediaCodec，不打包任何 .so
+        versionCode = 4
+        versionName = "1.1.0"
+        // lite 无 native 库；full 只打 arm64-v8a，控制 FFmpeg so 带来的体积增量
+        ndk { abiFilters.add("arm64-v8a") }
+    }
+
+    flavorDimensions += "codecs"
+    productFlavors {
+        // 轻量版：纯系统 MediaCodec，约 2.7 MB
+        create("lite") { dimension = "codecs" }
+        // 全格式版：NextLib FFmpeg 软解，支持 HEVC Main10 / AC3 / DTS / AV1 等
+        create("full") { dimension = "codecs" }
     }
 
     buildTypes {
@@ -62,6 +71,6 @@ dependencies {
     // 转码为兼容 MP4 / 去音轨 / 片段导出。不需要转码就注释掉，再省约 1MB
     implementation(libs.media3.transformer)
 
-    // 需要 AC3 / DTS / RMVB 等冷门编码的软解时再打开（会显著增大 APK）：
-    // implementation(libs.media3.decoder.ffmpeg)
+    // 仅 full flavor 打包 NextLib 的 FFmpeg 软解扩展（lite 完全不引入 native 库）
+    add("fullImplementation", libs.nextlib.media3ext)
 }

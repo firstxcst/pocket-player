@@ -1,7 +1,25 @@
 # PocketPlayer
 
-轻量级 Android 本地视频播放器。Material 3 + Jetpack Media3，纯 Kotlin、无第三方图片加载库、无 native `.so`，
-R8 + 资源压缩后 release APK 约 2.7 MB。
+轻量级 Android 本地视频播放器。Material 3 + Jetpack Media3 1.5.1，纯 Kotlin，
+无图片加载库、无 DI、无数据库。提供 **lite / full 两个版本**，按需选择。
+
+## 两个版本
+
+| | lite（默认） | full（全格式） |
+|---|---|---|
+| APK 体积 | 约 2.7 MB | 约 8 MB（含 arm64 FFmpeg so） |
+| 视频解码 | 系统 MediaCodec | MediaCodec + **NextLib FFmpeg 软解** |
+| 能播 | 设备硬解支持的编码 | 追加 HEVC 10-bit / Main10、VP8/VP9、H.264 软解，以及 AC3/EAC3/DTS/TrueHD 等音轨 |
+| native 库 | 无 | `arm64-v8a` only |
+| 许可证 | Apache-2.0 依赖 | 附加 **GPL-3.0**（NextLib / FFmpeg / libass） |
+
+full 版集成的是成熟方案 [NextLib](https://github.com/anilbeesetti/nextlib) 0.8.4（JitPack），
+其 `NextRenderersFactory` 与 `DefaultRenderersFactory` 一对一兼容，本项目只做工厂替换，没有自研解码器。
+该版本恰好依赖 `androidx.media3:media3-exoplayer:1.5.1`，与项目版本一致，无需升级 Media3。
+
+> 为什么不用 `media3-decoder-ffmpeg`：Google Maven 不发布该 AAR（1.5.1 的 aar/pom 实测 404），
+> 官方要求按 `libraries/decoder_ffmpeg/README.md` 用 NDK 自编；Jellyfin 的预编译 fork 只启用了
+> **音频**解码器（`flac alac mp3 aac ac3 eac3 dca mlp truehd`），解不了 HEVC 视频轨。
 
 ## 功能
 
@@ -12,15 +30,18 @@ R8 + 资源压缩后 release APK 约 2.7 MB。
 - **其它手势**：单击显隐控制条、左半屏上下滑亮度、右半屏上下滑音量、右上角一键锁定。
 - **播放体验**：断点续播、播放队列、倍速与步长记忆、解码器回退、本地文件小缓冲快速起播。
 - **转码**：解码失败时一键转码为 H.264 / AAC MP4，另支持去音轨、导出前 60 秒片段（Media3 Transformer）。
-- **版本更新**：应用内查询本仓库 GitHub Release，发现新版直接跳下载页；启动静默检查 6 小时节流。
+- **版本更新**：应用内查询本仓库 GitHub Release，按当前 flavor 推荐对应 APK；启动静默检查 6 小时节流。
+- **诊断弹窗**：解码失败时显示文件名、MIME、错误码、cause、设备型号、Android 版本与 flavor，可复制诊断信息，
+  并提供「忽略音轨重试 / 用其他播放器打开 / 转码 / 播放下一个」等自救动作。
 
 ## 构建
 
 Android Studio / AGP 8.7.3 / Gradle 8.9 / **JDK 17** / compileSdk 35 / minSdk 26。
 
 ```bash
-./gradlew assembleDebug
-./gradlew assembleRelease
+./gradlew assembleLiteRelease    # 轻量版
+./gradlew assembleFullRelease    # 全格式版
+./gradlew assembleLiteDebug
 ```
 
 命令行直连（不依赖 wrapper）示例，Windows PowerShell：
@@ -28,22 +49,21 @@ Android Studio / AGP 8.7.3 / Gradle 8.9 / **JDK 17** / compileSdk 35 / minSdk 26
 ```powershell
 $env:JAVA_HOME = "<JDK 17 路径>"
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
-& "$env:USERPROFILE\.gradle\wrapper\dists\gradle-8.9-bin\<hash>\gradle-8.9\bin\gradle.bat" -p . assembleDebug --no-daemon
+& "$env:USERPROFILE\.gradle\wrapper\dists\gradle-8.9-bin\<hash>\gradle-8.9\bin\gradle.bat" -p . assembleFullRelease --no-daemon
 ```
 
 release 产物未签名，需自行 `zipalign` + `apksigner` 签名；签名密钥不随仓库分发。
+`tools/prepare_videos.ps1` 是可选的桌面端音轨预处理脚本（PowerShell 7 / UTF-8，不需要管理员权限），
+只转音轨、不重编码视频、不改动原文件，支持 `-DryRun`。
 
 ## 已知限制
 
-- 覆盖 MP4 / MKV / WebM / AVI / TS / FLV 等容器与设备 MediaCodec 支持的编码。
-- **官方不向 Maven 发布 `media3-decoder-ffmpeg` 的 AAR**（Google Maven 上只有 `media3-decoder` 基础模块，
-  实测 1.5.1 的 aar/pom 均 404）。想要 App 内软解 AC3 / DTS，必须按 `libraries/decoder_ffmpeg/README.md`
-  用 NDK 自行编译，或改用第三方预编译分支；代价是体积和构建复杂度，默认版本不含任何 `.so`。
-- 因此遇到不支持的音轨时，App 会**自动静音播放**（v1.0.2 起）；想保留声音，用
-  `tools/prepare_videos.ps1` 在电脑端把音轨批量转成 AAC（视频轨直接 copy，不重编码、不改动原文件）。
+- lite 版遇到 HEVC 10-bit / Main10 等硬解不支持的流会失败，请改装 full 版或用桌面端转码。
+- full 版仅打包 `arm64-v8a`；32 位设备请自行在 `ndk.abiFilters` 增加 `armeabi-v7a`。
+- NextLib 为 GPL-3.0，分发 full 版需遵守其开源义务；lite 版不含该依赖。
 - Transformer 与播放器共用 extractor，RMVB / WMV 这类连容器都解不开的老格式无法靠转码救回。
 - 深度扫描需要「所有文件访问权限」；不授予也能用，只是列表可能不全。上架 Play 需按本地播放器类目申报。
 
 ## 版本
 
-Releases 页面提供已签名的 `PocketPlayer-release.apk` 与 `PocketPlayer-debug.apk`。
+Releases 页面提供 `PocketPlayer-release.apk`（lite）、`PocketPlayer-full.apk`（full）与 `PocketPlayer-debug.apk`。

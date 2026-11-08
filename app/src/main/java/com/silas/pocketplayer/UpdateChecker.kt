@@ -27,7 +27,7 @@ object UpdateChecker {
     )
 
     /** @return 最新 Release；网络异常 / 尚未发版 / 404 时返回 null（静默失败） */
-    suspend fun latest(): Release? = withContext(Dispatchers.IO) {
+    suspend fun latest(flavor: String = "lite"): Release? = withContext(Dispatchers.IO) {
         val conn = (URL(API_URL).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8000
             readTimeout = 8000
@@ -43,14 +43,26 @@ object UpdateChecker {
             if (tag.isBlank()) return@withContext null
 
             var apkUrl: String? = null
+            var bestScore = -1
             val assets = json.optJSONArray("assets")
             if (assets != null) {
                 for (i in 0 until assets.length()) {
                     val asset = assets.optJSONObject(i) ?: continue
                     val url = asset.optString("browser_download_url")
                     if (!url.endsWith(".apk", ignoreCase = true)) continue
-                    // 优先给 release 版，没有再退回任意 apk
-                    if (apkUrl == null || url.contains("release", ignoreCase = true)) apkUrl = url
+                    val name = url.substringAfterLast('/')
+                    // lite 用户下 PocketPlayer-release.apk，full 用户下 PocketPlayer-full.apk
+                    val score = when {
+                        flavor == "full" && name.equals("PocketPlayer-full.apk", true) -> 3
+                        flavor != "full" && name.equals("PocketPlayer-release.apk", true) -> 3
+                        name.contains("release", true) && !name.contains("full", true) -> 2
+                        !name.contains("debug", true) -> 1
+                        else -> 0
+                    }
+                    if (score > bestScore) {
+                        bestScore = score
+                        apkUrl = url
+                    }
                 }
             }
             Release(

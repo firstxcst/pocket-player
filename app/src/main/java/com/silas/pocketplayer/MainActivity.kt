@@ -240,7 +240,7 @@ class MainActivity : AppCompatActivity() {
         if (!manual && now - prefs.lastUpdateCheckMs < 6 * 60 * 60 * 1000L) return
         prefs.lastUpdateCheckMs = now
         lifecycleScope.launch {
-            val release = runCatching { UpdateChecker.latest() }.getOrNull()
+            val release = runCatching { UpdateChecker.latest(BuildConfig.FLAVOR) }.getOrNull()
             if (isFinishing || isDestroyed) return@launch
             if (release == null) {
                 if (manual) toast("检查失败：无法连接 GitHub，请检查网络")

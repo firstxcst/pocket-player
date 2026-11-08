@@ -321,9 +321,8 @@ class PlayerActivity : AppCompatActivity() {
     // ---------------------------------------------------------------- 播放器
 
     private fun initPlayer() {
-        val renderers = DefaultRenderersFactory(this)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
-            .setEnableDecoderFallback(true)   // 主解码器初始化失败时自动换备用解码器
+        // lite / full 由 productFlavor 决定工厂实现：前者系统 MediaCodec，后者 NextLib FFmpeg 软解
+        val renderers = createRenderersFactory(this)
         val loadControl = DefaultLoadControl.Builder()
             // 本地文件不需要网络播放那种大缓冲：起播更快、内存更省
             .setBufferDurationsMs(1500, 5000, 500, 500)
@@ -392,7 +391,7 @@ class PlayerActivity : AppCompatActivity() {
                 setAudioDisabled(true)
                 player.prepare()
                 player.playWhenReady = true
-                showHint("音轨不受支持，已静音播放\n电脑端 tools/prepare_videos.ps1 可转 AAC 恢复声音")
+                showHint("解码失败，正在忽略音轨重试…")
                 return
             }
             handlePlaybackError(error)
@@ -682,13 +681,18 @@ class PlayerActivity : AppCompatActivity() {
             append("格式：${item?.mimeType ?: ext.ifBlank { "未知" }}$resolution\n")
             append("错误：${error.errorCodeName} (${error.errorCode})\n")
             append("原因：$cause\n")
-            append("设备：${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            append("设备：${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
+            append("版本：${BuildConfig.VERSION_NAME} (${BuildConfig.FLAVOR})")
+        }
+        val flavorTip = if (BuildConfig.FLAVOR == "full") {
+            "当前已是全格式版（FFmpeg 软解已启用）；仍失败说明这条流超出该构建支持的解码器范围。"
+        } else {
+            "轻量版不含 FFmpeg 软解，改装 Release 里的「全格式版」APK 可直接软解 HEVC 10-bit / 冷门音轨。"
         }
         val advice = if (legacy) {
-            "\n\n这个容器的 extractor 系统不认，转码通常也救不了；建议交给带软解的播放器，或自行用 NDK 编译 FFmpeg 解码扩展。"
+            "\n\n这个容器的 extractor 系统不认，转码通常也救不了；建议交给带软解的播放器。"
         } else {
-            "\n\n最常见的是音轨编码（AC3 / DTS 等）设备不支持。已自动尝试静音重试；" +
-                "想保留声音，可在电脑端用 tools/prepare_videos.ps1 把音轨转成 AAC。"
+            "\n\n常见于 HEVC 10-bit（DJI / HDR 素材）或冷门音轨不被设备解码器支持。$flavorTip"
         }
         val actions = arrayOf(
             "忽略音轨重试",
